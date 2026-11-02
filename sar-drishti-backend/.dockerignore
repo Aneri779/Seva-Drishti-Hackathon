@@ -1,0 +1,17 @@
+## SAR-Drishti Docker Ignore
+# Never copy secrets or local state into image
+secrets/
+.env
+*.env.local
+sardrishti.db
+data/storage/
+postgres_data/
+redis_data/
+minio_data/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+tests/
+

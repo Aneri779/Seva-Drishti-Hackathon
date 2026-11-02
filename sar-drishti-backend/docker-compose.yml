@@ -1,0 +1,196 @@
+version: "3.9"
+
+# ================================================================
+# SAR-Drishti docker-compose — full production-like local stack
+# ================================================================
+x-common-env: &common-env
+  DATABASE_URL: postgresql+asyncpg://sardrishti:sardrishti@postgis:5432/sardrishti
+  DATABASE_SYNC_URL: postgresql+psycopg2://sardrishti:sardrishti@postgis:5432/sardrishti
+  REDIS_URL: redis://redis:6379/0
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: sardrishti_admin
+  MINIO_SECRET_KEY: sardrishti_secret_2024
+  MINIO_BUCKET: sardrishti
+  MINIO_SECURE: "false"
+  GEE_PROJECT: ${GEE_PROJECT}
+  GEE_KEY_FILE: /run/secrets/gee_key
+  CDSE_USERNAME: ${CDSE_USERNAME:-}
+  CDSE_PASSWORD: ${CDSE_PASSWORD:-}
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_ALGORITHM: HS256
+  JWT_ACCESS_TTL_MIN: 15
+  JWT_REFRESH_TTL_DAYS: 7
+  OTP_TTL_SEC: 300
+  OTP_RATE_LIMIT_COUNT: 3
+  OTP_RATE_LIMIT_WINDOW_MIN: 10
+  OTP_MAX_VERIFY_ATTEMPTS: 5
+  SMS_GATEWAY: console
+  WHATSAPP_GATEWAY: console
+  SANDES_GATEWAY: console
+  DEMO_MODE: "false"
+  ENV: production
+  ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  SCENE_REFRESH_INTERVAL_H: 3
+
+services:
+
+  # ── PostGIS + pgRouting ─────────────────────────────────────
+  postgis:
+    image: postgis/postgis:16-3.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sardrishti
+      POSTGRES_USER: sardrishti
+      POSTGRES_PASSWORD: sardrishti
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sardrishti -d sardrishti"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── MinIO (S3-compatible COG store) ─────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-07-04T14-25-45Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: sardrishti_admin
+      MINIO_ROOT_PASSWORD: sardrishti_secret_2024
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Martin (vector tile server for MapLibre) ─────────────────
+  martin:
+    image: ghcr.io/maplibre/martin:v0.14.2
+    restart: unless-stopped
+    command: ["--config", "/config/martin.yaml"]
+    environment:
+      DATABASE_URL: postgresql://sardrishti:sardrishti@postgis:5432/sardrishti
+    volumes:
+      - ./config/martin.yaml:/config/martin.yaml:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+  # ── TiTiler (COG raster tiles) ───────────────────────────────
+  titiler:
+    image: ghcr.io/developmentseed/titiler:0.18.5
+    restart: unless-stopped
+    environment:
+      TITILER_API_ROOT_PATH: /tiles
+      AWS_ACCESS_KEY_ID: sardrishti_admin
+      AWS_SECRET_ACCESS_KEY: sardrishti_secret_2024
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_DEFAULT_REGION: us-east-1
+      GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+      CPL_VSIL_CURL_ALLOWED_EXTENSIONS: .tif,.tiff
+    ports:
+      - "8001:80"
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # ── FastAPI application ──────────────────────────────────────
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    secrets:
+      - gee_key
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head && 
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Celery Worker (SAR processing tasks) ─────────────────────
+  worker:
+    build: .
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    secrets:
+      - gee_key
+    volumes:
+      - ./data:/app/data
+    command: >
+      celery -A app.tasks.celery_app worker
+      --loglevel=info
+      --concurrency=2
+      --queues=sar_processing,default
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Beat (scene_watcher every 3 h) ───────────────────
+  beat:
+    build: .
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    secrets:
+      - gee_key
+    command: >
+      celery -A app.tasks.celery_app beat
+      --loglevel=info
+      --scheduler redbeat.RedBeatScheduler
+    depends_on:
+      redis:
+        condition: service_healthy
+
+secrets:
+  gee_key:
+    file: ./secrets/gee-key.json
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

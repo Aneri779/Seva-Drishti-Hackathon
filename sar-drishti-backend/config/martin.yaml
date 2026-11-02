@@ -1,0 +1,56 @@
+connections:
+  - connection_string: ${DATABASE_URL}
+    schemas:
+      - public
+
+# Vector tile sources
+tables:
+  flood_polygons:
+    schema: public
+    table: flood_polygons
+    geometry_column: geom
+    srid: 4326
+    geometry_type: POLYGON
+    properties:
+      scene_id: integer
+      status_class: text
+      depth_m: double precision
+      confidence: double precision
+
+  road_segments:
+    schema: public
+    table: road_segments
+    geometry_column: geom
+    srid: 4326
+    geometry_type: LINESTRING
+    properties:
+      road_id: integer
+      start_m: integer
+      end_m: integer
+      crest_elev: double precision
+      chainage_source: text
+
+  road_status_latest:
+    schema: public
+    table: road_status_latest
+    geometry_column: geom
+    srid: 4326
+    geometry_type: LINESTRING
+    properties:
+      status_class: text
+      max_depth_m: double precision
+      road_code: text
+
+  road_edges:
+    schema: public
+    table: road_edges
+    geometry_column: geom
+    srid: 4326
+    geometry_type: LINESTRING
+    properties:
+      source: integer
+      target: integer
+      cost: double precision
+      reverse_cost: double precision
+      passable: boolean
+
