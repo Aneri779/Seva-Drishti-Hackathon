@@ -213,8 +213,8 @@ VITE_API_URL=http://127.0.0.1:8000/api/v1
 3. Run the schema creation and initial seeding:
    ```bash
    cd sar-drishti-backend
-   python scripts/init_db.py
-   python scripts/seed_all.py
+   python scripts/seed_demo.py
+   python ../scripts/fix_district_gujarati.py
    ```
 4. Verify the database tables:
    ```bash
